@@ -1,7 +1,7 @@
 #include <M5Cardputer.h>
-#include <esp_heap_caps.h>
-#include <cstdarg>
 #include <cmath>
+#include <cstdarg>
+#include <esp_heap_caps.h>
 
 // -----------------------------------------------------------------------------
 // Echo Critter v1
@@ -9,14 +9,12 @@
 // Playback always returns the recording at a playful chipmunk (~1.4x) speed.
 // -----------------------------------------------------------------------------
 
-constexpr uint32_t SAMPLE_RATE = 16000;           // Microphone & speaker base rate
-constexpr uint32_t MAX_RECORD_MS = 3000;          // Maximum record length (3 seconds)
-constexpr size_t MAX_SAMPLES = SAMPLE_RATE * MAX_RECORD_MS / 1000;
-constexpr size_t BUFFER_BYTES = MAX_SAMPLES * sizeof(int16_t);
-constexpr uint32_t FACE_BLINK_INTERVAL = 120;     // milliseconds between playface blinks
-constexpr size_t RECORD_CHUNK_SAMPLES = 256;      // Samples per I2S read block
-constexpr float CHIPMUNK_MULTIPLIER = 1.4f;       // Playback rate multiplier
-constexpr bool ENABLE_DEBUG_LOG = true;           // Toggle verbose serial logging
+constexpr uint32_t SAMPLE_RATE = 16000;          // Microphone & speaker base rate
+constexpr uint32_t DEFAULT_RECORD_MS = 10000;    // Target record length (10 seconds)
+constexpr uint32_t FACE_BLINK_INTERVAL = 120;    // milliseconds between playface blinks
+constexpr size_t RECORD_CHUNK_SAMPLES = 256;     // Samples per I2S read block
+constexpr float CHIPMUNK_MULTIPLIER = 1.4f;  // Playback rate multiplier
+constexpr bool ENABLE_DEBUG_LOG = true;      // Toggle verbose serial logging
 
 enum class FaceState { Idle, Recording, Playing };
 
@@ -25,18 +23,18 @@ enum class FaceState { Idle, Recording, Playing };
 // -----------------------------------------------------------------------------
 
 namespace Log {
-  void print(const char *fmt, ...) {
-    if (!ENABLE_DEBUG_LOG) {
-      return;
-    }
-    va_list args;
-    va_start(args, fmt);
-    Serial.printf("[Echo] ");
-    Serial.vprintf(fmt, args);
-    Serial.println();
-    va_end(args);
+void print(const char *fmt, ...) {
+  if (!ENABLE_DEBUG_LOG) {
+    return;
   }
+  va_list args;
+  va_start(args, fmt);
+  Serial.printf("[Echo] ");
+  Serial.vprintf(fmt, args);
+  Serial.println();
+  va_end(args);
 }
+} // namespace Log
 
 // -----------------------------------------------------------------------------
 // Display controller
@@ -55,9 +53,11 @@ public:
     M5.Display.fillScreen(TFT_BLACK);
     M5.Display.setTextDatum(textdatum_t::middle_center);
     M5.Display.setTextSize(3);
-    M5.Display.drawString("Echo Critter v1", M5.Display.width() / 2, M5.Display.height() / 2 - 20);
+    M5.Display.drawString("loopi v1", M5.Display.width() / 2,
+                          M5.Display.height() / 2 - 20);
     M5.Display.setTextSize(2);
-    M5.Display.drawString("Hold GO to record", M5.Display.width() / 2, M5.Display.height() / 2 + 20);
+    M5.Display.drawString("Hold GO to record", M5.Display.width() / 2,
+                          M5.Display.height() / 2 + 20);
     delay(2000);
     M5.Display.fillScreen(TFT_BLACK);
     updateStatus(false, false);
@@ -65,7 +65,8 @@ public:
   }
 
   void updateFace(FaceState state, float meter, bool blinkPhase = false) {
-    if (state == lastFace && std::fabs(lastMeter - meter) < 0.02f && blinkPhase == lastBlinkPhase) {
+    if (state == lastFace && std::fabs(lastMeter - meter) < 0.02f &&
+        blinkPhase == lastBlinkPhase) {
       return;
     }
 
@@ -74,19 +75,19 @@ public:
 
     const char *faceText = "(o_o)";
     switch (state) {
-      case FaceState::Idle:
-        faceText = "(o_o)";
-        M5.Display.setTextSize(2);
-        M5.Display.drawString("Hold GO to record", M5.Display.width() / 2, 150);
-        M5.Display.fillRect(0, 180, M5.Display.width(), 50, TFT_BLACK);
-        break;
-      case FaceState::Recording:
-        faceText = "(^-^)";
-        drawRecordingHud(meter);
-        break;
-      case FaceState::Playing:
-        faceText = blinkPhase ? "(*>w<)" : "(*>w<)♪";
-        break;
+    case FaceState::Idle:
+      faceText = "(o_o)";
+      M5.Display.setTextSize(2);
+      M5.Display.drawString("Hold GO to record", M5.Display.width() / 2, 150);
+      M5.Display.fillRect(0, 180, M5.Display.width(), 50, TFT_BLACK);
+      break;
+    case FaceState::Recording:
+      faceText = "(^-^)";
+      drawRecordingHud(meter);
+      break;
+    case FaceState::Playing:
+      faceText = blinkPhase ? "(^o^ )" : "( ^O^)";
+      break;
     }
 
     M5.Display.setTextSize(4);
@@ -105,9 +106,15 @@ public:
 
     const char *label = nullptr;
     switch (state) {
-      case 1: label = "Recording..."; break;
-      case 2: label = "Release to play"; break;
-      default: label = "Hold GO to record"; break;
+    case 1:
+      label = "Recording...";
+      break;
+    case 2:
+      label = "Release to play";
+      break;
+    default:
+      label = "Hold GO to record";
+      break;
     }
 
     M5.Display.fillRoundRect(10, 10, 220, 36, 8, TFT_DARKGREY);
@@ -121,7 +128,8 @@ public:
 
 private:
   void drawRecordingHud(float level) {
-    uint16_t barWidth = static_cast<uint16_t>((M5.Display.width() - 40) * constrain(level, 0.0f, 1.0f));
+    uint16_t barWidth = static_cast<uint16_t>((M5.Display.width() - 40) *
+                                              constrain(level, 0.0f, 1.0f));
     uint16_t barHeight = 16;
     int16_t x = 20;
     int16_t y = 190;
@@ -146,14 +154,13 @@ private:
 
 class InputController {
 public:
-  void begin() {
-    keyboardEnabled = true;
-  }
+  void begin() { keyboardEnabled = true; }
 
   void update() {
     M5Cardputer.update();
 
-    bool kbEnter = keyboardEnabled ? M5Cardputer.Keyboard.keysState().enter : false;
+    bool kbEnter =
+        keyboardEnabled ? M5Cardputer.Keyboard.keysState().enter : false;
     bool button = M5.BtnA.isPressed();
     current = kbEnter || button;
     justPressedFlag = current && !previous;
@@ -179,11 +186,75 @@ private:
 
 class AudioEngine {
 public:
-  bool begin() {
-    buffer = static_cast<int16_t *>(heap_caps_malloc(BUFFER_BYTES, MALLOC_CAP_8BIT | MALLOC_CAP_DMA));
-    if (!buffer) {
-      buffer = static_cast<int16_t *>(ps_malloc(BUFFER_BYTES));
+  enum class MemoryPool {
+    PSRAM_DMA,
+    PSRAM,
+    InternalDMA,
+    PSMalloc,
+    Heap,
+    Unknown
+  };
+
+  const char* poolName(MemoryPool pool) const {
+    switch (pool) {
+      case MemoryPool::PSRAM_DMA:   return "PSRAM_DMA";
+      case MemoryPool::PSRAM:       return "PSRAM";
+      case MemoryPool::InternalDMA: return "InternalDMA";
+      case MemoryPool::PSMalloc:    return "PSMalloc";
+      case MemoryPool::Heap:        return "Heap";
+      default:                      return "Unknown";
     }
+  }
+
+  bool begin() {
+    static const uint32_t candidates[] = {
+        DEFAULT_RECORD_MS, 8000, 6000, 5000, 4000, 3000, 2000, 1000};
+
+    for (uint32_t candidate : candidates) {
+      size_t samples = (SAMPLE_RATE * candidate) / 1000;
+      if (samples == 0) {
+        continue;
+      }
+      size_t bytes = samples * sizeof(int16_t);
+
+      buffer = nullptr;
+      allocatedFrom = MemoryPool::Unknown;
+
+      buffer = static_cast<int16_t *>(
+          heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA));
+      if (buffer) { allocatedFrom = MemoryPool::PSRAM_DMA; }
+
+      if (!buffer) {
+        buffer = static_cast<int16_t *>(
+            heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        if (buffer) { allocatedFrom = MemoryPool::PSRAM; }
+      }
+      if (!buffer) {
+        buffer = static_cast<int16_t *>(
+            heap_caps_malloc(bytes, MALLOC_CAP_8BIT | MALLOC_CAP_DMA));
+        if (buffer) { allocatedFrom = MemoryPool::InternalDMA; }
+      }
+      if (!buffer) {
+        buffer = static_cast<int16_t *>(ps_malloc(bytes));
+        if (buffer) { allocatedFrom = MemoryPool::PSMalloc; }
+      }
+      if (!buffer) {
+        buffer = static_cast<int16_t *>(malloc(bytes));
+        if (buffer) { allocatedFrom = MemoryPool::Heap; }
+      }
+
+      if (buffer) {
+        maxSamples = samples;
+        maxRecordMs = candidate;
+        bufferBytes = bytes;
+        Log::print("Audio buffer allocation ok: %u ms (%u bytes) from %s",
+                   static_cast<unsigned>(maxRecordMs),
+                   static_cast<unsigned>(bufferBytes),
+                   poolName(allocatedFrom));
+        break;
+      }
+    }
+
     if (!buffer) {
       Log::print("FATAL: audio buffer allocation failed");
       return false;
@@ -196,8 +267,7 @@ public:
     micCfg.dma_buf_len = 256;
     M5.Mic.config(micCfg);
     Log::print("Mic config set: rate=%u stereo=%d dma=%u/%u",
-               micCfg.sample_rate,
-               micCfg.stereo,
+               micCfg.sample_rate, micCfg.stereo,
                static_cast<unsigned>(micCfg.dma_buf_count),
                static_cast<unsigned>(micCfg.dma_buf_len));
 
@@ -210,8 +280,7 @@ public:
     M5.Speaker.setVolume(255);
     M5.Speaker.setAllChannelVolume(255);
     Log::print("Speaker config set: rate=%u stereo=%d dma=%u/%u volume=%u",
-               spkCfg.sample_rate,
-               spkCfg.stereo,
+               spkCfg.sample_rate, spkCfg.stereo,
                static_cast<unsigned>(spkCfg.dma_buf_count),
                static_cast<unsigned>(spkCfg.dma_buf_len),
                static_cast<unsigned>(M5.Speaker.getVolume()));
@@ -223,6 +292,10 @@ public:
   }
 
   void startRecording() {
+    if (!buffer) {
+      return;
+    }
+
     if (M5.Speaker.isRunning()) {
       M5.Speaker.stop();
     }
@@ -238,7 +311,7 @@ public:
     level = 0.0f;
     levelTimestamp = recordStart;
 
-    Log::print("Recording started");
+    Log::print("Recording started (limit %u ms)", static_cast<unsigned>(maxRecordMs));
   }
 
   void stopRecording() {
@@ -250,7 +323,8 @@ public:
       delay(2);
     }
     hasRecordingFlag = recordedSamples > 0;
-    Log::print("Recording complete, samples=%u", static_cast<unsigned>(recordedSamples));
+    Log::print("Recording complete, samples=%u",
+               static_cast<unsigned>(recordedSamples));
   }
 
   void updateRecording() {
@@ -258,13 +332,18 @@ public:
       return;
     }
 
-    if (recordedSamples >= MAX_SAMPLES) {
+    if (!buffer || maxSamples == 0) {
+      return;
+    }
+
+    if (recordedSamples >= maxSamples) {
       stopRecording();
       return;
     }
 
-    size_t remaining = MAX_SAMPLES - recordedSamples;
-    size_t chunkSamples = (remaining < RECORD_CHUNK_SAMPLES) ? remaining : RECORD_CHUNK_SAMPLES;
+    size_t remaining = maxSamples - recordedSamples;
+    size_t chunkSamples =
+        (remaining < RECORD_CHUNK_SAMPLES) ? remaining : RECORD_CHUNK_SAMPLES;
     int16_t *dst = buffer + recordedSamples;
 
     if (M5.Mic.record(dst, chunkSamples, SAMPLE_RATE, false)) {
@@ -274,15 +353,16 @@ public:
         accum += s * s;
       }
       level = (chunkSamples > 0)
-          ? constrain(sqrtf(accum / static_cast<double>(chunkSamples)) * 4.0f, 0.0f, 1.0f)
-          : 0.0f;
+                  ? constrain(sqrtf(accum / static_cast<double>(chunkSamples)) *
+                                  4.0f,
+                              0.0f, 1.0f)
+                  : 0.0f;
       recordedSamples += chunkSamples;
       levelTimestamp = millis();
       hasRecordingFlag = recordedSamples > 0;
       Log::print("Captured chunk=%u total=%u meter=%.2f",
                  static_cast<unsigned>(chunkSamples),
-                 static_cast<unsigned>(recordedSamples),
-                 level);
+                 static_cast<unsigned>(recordedSamples), level);
     } else if (millis() - levelTimestamp > 60) {
       level *= 0.92f;
       if (level < 0.01f) {
@@ -318,11 +398,15 @@ public:
     }
     M5.Speaker.setVolume(255);
     M5.Speaker.setAllChannelVolume(255);
-    Log::print("Speaker volume=%u", static_cast<unsigned>(M5.Speaker.getVolume()));
+    Log::print("Speaker volume=%u",
+               static_cast<unsigned>(M5.Speaker.getVolume()));
 
-    uint32_t playbackRate = static_cast<uint32_t>(SAMPLE_RATE * CHIPMUNK_MULTIPLIER);
-    bool started = M5.Speaker.playRaw(buffer, recordedSamples, playbackRate, false, 1, 0);
-    Log::print("Playback started samples=%u", static_cast<unsigned>(recordedSamples));
+    uint32_t playbackRate =
+        static_cast<uint32_t>(SAMPLE_RATE * CHIPMUNK_MULTIPLIER);
+    bool started =
+        M5.Speaker.playRaw(buffer, recordedSamples, playbackRate, false, 1, 0);
+    Log::print("Playback started samples=%u",
+               static_cast<unsigned>(recordedSamples));
 
     uint32_t blinkTimer = millis();
     bool blinkPhase = false;
@@ -350,7 +434,10 @@ public:
   bool hasRecording() const { return hasRecordingFlag; }
   float currentLevel() const { return level; }
   size_t sampleCount() const { return recordedSamples; }
-  uint32_t recordingElapsed() const { return recording ? millis() - recordStart : 0; }
+  uint32_t recordLimitMs() const { return maxRecordMs; }
+  uint32_t recordingElapsed() const {
+    return recording ? millis() - recordStart : 0;
+  }
 
   void resetAfterPlayback() {
     recordedSamples = 0;
@@ -367,6 +454,10 @@ private:
   uint32_t recordStart = 0;
   float level = 0.0f;
   uint32_t levelTimestamp = 0;
+  size_t maxSamples = 0;
+  uint32_t maxRecordMs = DEFAULT_RECORD_MS;
+  size_t bufferBytes = 0;
+  MemoryPool allocatedFrom = MemoryPool::Unknown;
 };
 
 // -----------------------------------------------------------------------------
@@ -392,7 +483,9 @@ public:
     display.showSplash();
 
     if (!audio.begin()) {
-      while (true) { delay(1000); }
+      while (true) {
+        delay(1000);
+      }
     }
   }
 
@@ -409,16 +502,18 @@ public:
       audio.updateRecording();
       display.updateFace(FaceState::Recording, audio.currentLevel());
       display.updateStatus(true, audio.hasRecording());
-      if (audio.recordingElapsed() >= MAX_RECORD_MS) {
+      if (audio.recordingElapsed() >= audio.recordLimitMs()) {
         audio.stopRecording();
+        Log::print("Max duration reached -> auto playback");
+        autoPlayPending = true;
       }
     }
 
     if (input.released()) {
-      Log::print("Enter released, recordingActive=%d hasRecording=%d samples=%u",
-                 audio.isRecording() ? 1 : 0,
-                 audio.hasRecording() ? 1 : 0,
-                 static_cast<unsigned>(audio.sampleCount()));
+      Log::print(
+          "Enter released, recordingActive=%d hasRecording=%d samples=%u",
+          audio.isRecording() ? 1 : 0, audio.hasRecording() ? 1 : 0,
+          static_cast<unsigned>(audio.sampleCount()));
 
       if (audio.isRecording()) {
         audio.stopRecording();
@@ -429,10 +524,20 @@ public:
         display.updateFace(FaceState::Playing, 0.0f);
         if (audio.playChipmunk(display)) {
           audio.resetAfterPlayback();
+          autoPlayPending = false;
         }
       } else {
         display.updateFace(FaceState::Idle, 0.0f);
         display.updateStatus(false, false);
+      }
+    }
+
+    if (autoPlayPending && audio.hasRecording() && !audio.isRecording()) {
+      display.updateStatus(false, true);
+      display.updateFace(FaceState::Playing, 0.0f);
+      if (audio.playChipmunk(display)) {
+        audio.resetAfterPlayback();
+        autoPlayPending = false;
       }
     }
 
@@ -446,6 +551,7 @@ private:
   DisplayController display;
   InputController input;
   AudioEngine audio;
+  bool autoPlayPending = false;
 };
 
 // -----------------------------------------------------------------------------
@@ -454,10 +560,6 @@ private:
 
 EchoApp app;
 
-void setup() {
-  app.setup();
-}
+void setup() { app.setup(); }
 
-void loop() {
-  app.loop();
-}
+void loop() { app.loop(); }
