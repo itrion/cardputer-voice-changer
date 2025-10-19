@@ -1,8 +1,4 @@
-#include <M5Unified.h>
-#include <M5GFX.h>
-#include <esp32-hal-psram.h>
-#include <cmath>
-#include <cstring>
+#include <M5Cardputer.h>
 
 // -----------------------------------------------------------------------------
 // Echo Critter v1
@@ -15,6 +11,8 @@ constexpr uint32_t MAX_RECORD_MS = 3000;          // Maximum record length (3 se
 constexpr size_t MAX_SAMPLES = SAMPLE_RATE * MAX_RECORD_MS / 1000;
 constexpr size_t BUFFER_BYTES = MAX_SAMPLES * sizeof(int16_t);
 constexpr uint32_t FACE_BLINK_INTERVAL = 120;     // milliseconds between playface blinks
+constexpr size_t RECORD_CHUNK_SAMPLES = 256;      // Samples per I2S read block
+constexpr bool ENABLE_DEBUG_LOG = true;          // Toggle verbose serial logging
 
 // Modes for playback behaviour.
 enum PlaybackMode { MODE_NORMAL = 0, MODE_MOUSE = 1 };
@@ -33,6 +31,28 @@ uint32_t recordStartMs = 0;                       // Timestamp when recording st
 uint32_t blinkTimer = 0;                          // Used for playback face animation
 bool blinkPhase = false;                          // Toggle for blinking animation
 
+// Microphone chunk tracking.
+bool micChunkInFlight = false;
+size_t micChunkLength = 0;
+int16_t *micChunkPtr = nullptr;
+uint32_t micChunkStartMs = 0;
+float micLastMeter = 0.0f;
+uint32_t micDecayStamp = 0;
+
+bool cardputerKeyboardEnabled = false;
+
+void logf(const char *fmt, ...) {
+  if (!ENABLE_DEBUG_LOG) {
+    return;
+  }
+  va_list args;
+  va_start(args, fmt);
+  Serial.printf("[Echo] ");
+  Serial.vprintf(fmt, args);
+  Serial.println();
+  va_end(args);
+}
+
 // Forward declarations for helper functions requested in the task description.
 void initDisplay();
 void initAudio();
@@ -44,6 +64,7 @@ void drawModeBadge();
 
 // Utility helpers.
 void showSplash();
+void updateInput();
 void stopRecording();
 void startRecording();
 void drawRecordingHud(float level);
@@ -51,16 +72,22 @@ void playBuffer(uint32_t playbackRate);
 
 void setup() {
   auto cfg = M5.config();
-  cfg.output_power = true;        // Ensure speaker amplifier is powered
-  cfg.internal_mic = true;        // Enable internal microphone path
-  cfg.external_speaker = true;    // Speaker is connected via I2S
   M5.begin(cfg);
+  logf("Booting Echo Critter, board=%d", static_cast<int>(M5.getBoard()));
+
+  auto board = M5.getBoard();
+  if (board == m5::board_t::board_M5Cardputer || board == m5::board_t::board_M5CardputerADV) {
+    M5Cardputer.Keyboard.begin();
+    cardputerKeyboardEnabled = true;
+    logf("Cardputer keyboard enabled");
+  }
 
   // Allocate audio buffer preferably in PSRAM.
   audioBuffer = static_cast<int16_t *>(ps_malloc(BUFFER_BYTES));
   if (!audioBuffer) {
     audioBuffer = static_cast<int16_t *>(malloc(BUFFER_BYTES));
   }
+  logf("Audio buffer allocation %s (%u bytes)", audioBuffer ? "ok" : "FAILED", static_cast<unsigned>(BUFFER_BYTES));
 
   initDisplay();
   initAudio();
@@ -68,12 +95,24 @@ void setup() {
 }
 
 void loop() {
-  M5.update();
+  updateInput();
 
-  // ENTER button on Cardputer maps to BtnA in M5Unified.
-  bool enterPressed = M5.BtnA.isPressed();
-  bool enterJustPressed = M5.BtnA.wasPressed();
-  bool enterReleased = M5.BtnA.wasReleased();
+  bool enterPressed = false;
+  bool enterJustPressed = false;
+  bool enterReleased = false;
+
+  if (cardputerKeyboardEnabled) {
+    static bool prevEnter = false;
+    bool enterNow = M5Cardputer.Keyboard.keysState().enter;
+    enterPressed = enterNow;
+    enterJustPressed = enterNow && !prevEnter;
+    enterReleased = !enterNow && prevEnter;
+    prevEnter = enterNow;
+  } else {
+    enterPressed = M5.BtnA.isPressed();
+    enterJustPressed = M5.BtnA.wasPressed();
+    enterReleased = M5.BtnA.wasReleased();
+  }
 
   if (enterJustPressed && !recordingActive) {
     startRecording();
@@ -90,18 +129,23 @@ void loop() {
   }
 
   if (enterReleased) {
+    logf("Enter released, recordingActive=%d hasRecording=%d samples=%u", recordingActive ? 1 : 0, hasRecording ? 1 : 0, static_cast<unsigned>(recordedSamples));
     if (recordingActive) {
       stopRecording();
     }
 
     if (hasRecording && recordedSamples > 0) {
       if (currentMode == MODE_NORMAL) {
+        logf("Playback NORMAL mode");
         playNormal();
         currentMode = MODE_MOUSE;
       } else {
+        logf("Playback MOUSE mode");
         playMouse();
         currentMode = MODE_NORMAL;
       }
+    } else {
+      logf("No recording available on release");
     }
 
     drawModeBadge();
@@ -164,7 +208,7 @@ void drawFace(FaceState state, float meter) {
       drawRecordingHud(meter);
       break;
     case FACE_PLAYING:
-      faceText = blinkPhase ? "(*>w<)" : "(*>w<)♪";
+      faceText = blinkPhase ? "(^O^)" : "(^o^)";
       break;
   }
 
@@ -209,6 +253,14 @@ void drawRecordingHud(float level) {
   M5.Display.drawString("LISTENING", M5.Display.width() / 2, y - 14);
 }
 
+void updateInput() {
+  M5.update();
+  if (cardputerKeyboardEnabled) {
+    M5Cardputer.Keyboard.updateKeyList();
+    M5Cardputer.Keyboard.updateKeysState();
+  }
+}
+
 // -----------------------------------------------------------------------------
 // Audio initialisation
 // -----------------------------------------------------------------------------
@@ -218,6 +270,7 @@ void initAudio() {
     M5.Display.setTextDatum(textdatum_t::top_center);
     M5.Display.setTextSize(2);
     M5.Display.drawString("Audio buffer alloc failed!", M5.Display.width() / 2, 0);
+    logf("FATAL: audioBuffer allocation failed");
     while (true) {
       delay(1000);
     }
@@ -228,15 +281,21 @@ void initAudio() {
   micCfg.stereo = false;
   micCfg.dma_buf_count = 6;
   micCfg.dma_buf_len = 256;
-  M5.Mic.begin(micCfg);
+  M5.Mic.config(micCfg);
+  logf("Mic config set: rate=%u stereo=%d dma=%u/%u", micCfg.sample_rate, micCfg.stereo, static_cast<unsigned>(micCfg.dma_buf_count), static_cast<unsigned>(micCfg.dma_buf_len));
 
   auto spkCfg = M5.Speaker.config();
   spkCfg.sample_rate = SAMPLE_RATE;
   spkCfg.stereo = false;
   spkCfg.dma_buf_len = 256;
   spkCfg.dma_buf_count = 6;
-  M5.Speaker.begin(spkCfg);
-  M5.Speaker.setVolume(128);
+  M5.Speaker.config(spkCfg);
+  M5.Speaker.setVolume(180);
+  logf("Speaker config set: rate=%u stereo=%d dma=%u/%u volume=%u", spkCfg.sample_rate, spkCfg.stereo, static_cast<unsigned>(spkCfg.dma_buf_count), static_cast<unsigned>(spkCfg.dma_buf_len), static_cast<unsigned>(M5.Speaker.getVolume()));
+
+  M5.Speaker.end();  // Free I2S for the microphone by default
+  bool micOk = M5.Mic.begin();
+  logf("Mic.begin -> %s", micOk ? "ok" : "FAILED");
 }
 
 // -----------------------------------------------------------------------------
@@ -248,6 +307,16 @@ void startRecording() {
     return;
   }
 
+  logf("startRecording()");
+
+  if (M5.Speaker.isRunning()) {
+    M5.Speaker.stop();
+    M5.Speaker.end();
+  }
+  if (!M5.Mic.isRunning()) {
+    M5.Mic.begin();
+  }
+
   recordedSamples = 0;
   hasRecording = false;
   recordingActive = true;
@@ -255,52 +324,120 @@ void startRecording() {
   blinkTimer = millis();
   blinkPhase = false;
 
-  M5.Mic.start();
+  micChunkInFlight = false;
+  micChunkLength = 0;
+  micChunkPtr = nullptr;
+  micLastMeter = 0.0f;
+  micChunkStartMs = millis();
+  micDecayStamp = millis();
+
   drawFace(FACE_RECORDING, 0.0f);
   drawModeBadge();
 }
 
 void stopRecording() {
-  M5.Mic.stop();
+  if (!recordingActive) {
+    return;
+  }
+
+  logf("stopRecording() in-flight=%d", micChunkInFlight ? 1 : 0);
+
   recordingActive = false;
+
+  if (micChunkInFlight) {
+    uint32_t guardStart = millis();
+    while (M5.Mic.isRecording() != 0 && (millis() - guardStart) < 120) {
+      delay(2);
+    }
+    if (M5.Mic.isRecording() == 0) {
+      double accum = 0.0;
+      for (size_t i = 0; i < micChunkLength; ++i) {
+        float sample = micChunkPtr[i] / 32768.0f;
+        accum += sample * sample;
+      }
+      if (micChunkLength > 0) {
+        micLastMeter = constrain(sqrtf(accum / micChunkLength) * 4.0f, 0.0f, 1.0f);
+        recordedSamples += micChunkLength;
+      }
+      micChunkInFlight = false;
+      micChunkPtr = nullptr;
+      micChunkLength = 0;
+      logf("Flushed last chunk, total samples=%u", static_cast<unsigned>(recordedSamples));
+    }
+  }
+
+  while (M5.Mic.isRecording() != 0) {
+    delay(2);
+  }
+
   hasRecording = recordedSamples > 0;
+  micLastMeter = 0.0f;
+  logf("Recording complete, samples=%u", static_cast<unsigned>(recordedSamples));
 }
 
 void recordOnce(float &levelOut) {
-  if (!recordingActive) {
+  levelOut = micLastMeter;
+
+  if (!recordingActive || !audioBuffer) {
     levelOut = 0.0f;
     return;
   }
 
-  const size_t chunkSamples = 256;
-  int16_t temp[chunkSamples];
+  if (!micChunkInFlight) {
+    if (recordedSamples >= MAX_SAMPLES) {
+      stopRecording();
+      logf("Recording buffer full at %u samples", static_cast<unsigned>(recordedSamples));
+      levelOut = micLastMeter;
+      return;
+    }
 
-  size_t samples = M5.Mic.record(temp, chunkSamples);
-  if (samples == 0) {
-    levelOut = 0.0f;
+    size_t remaining = MAX_SAMPLES - recordedSamples;
+    micChunkLength = (remaining < RECORD_CHUNK_SAMPLES) ? remaining : RECORD_CHUNK_SAMPLES;
+    if (micChunkLength == 0) {
+      stopRecording();
+      levelOut = micLastMeter;
+      return;
+    }
+
+    micChunkPtr = audioBuffer + recordedSamples;
+    micChunkStartMs = millis();
+    micDecayStamp = micChunkStartMs;
+    micChunkInFlight = true;
+    M5.Mic.record(micChunkPtr, micChunkLength, SAMPLE_RATE, false);
+    logf("Queued mic chunk length=%u at sample=%u", static_cast<unsigned>(micChunkLength), static_cast<unsigned>(recordedSamples));
+    levelOut = micLastMeter;
     return;
   }
 
-  size_t remaining = MAX_SAMPLES - recordedSamples;
-  if (samples > remaining) {
-    samples = remaining;
+  if (M5.Mic.isRecording() == 0 && (millis() - micChunkStartMs) > 8) {
+    double accum = 0.0;
+    for (size_t i = 0; i < micChunkLength; ++i) {
+      const float s = micChunkPtr[i] / 32768.0f;
+      accum += s * s;
+    }
+    size_t completed = micChunkLength;
+    if (completed > 0) {
+      micLastMeter = constrain(sqrtf(accum / completed) * 4.0f, 0.0f, 1.0f);
+      recordedSamples += completed;
+    }
+    micChunkPtr = nullptr;
+    micChunkLength = 0;
+    micChunkInFlight = false;
+    logf("Captured mic chunk=%u total=%u meter=%.2f", static_cast<unsigned>(completed), static_cast<unsigned>(recordedSamples), micLastMeter);
+  } else if (millis() - micDecayStamp > 40) {
+    micDecayStamp = millis();
+    micLastMeter *= 0.94f;
+    if (micLastMeter < 0.01f) {
+      micLastMeter = 0.0f;
+    }
   }
-
-  memcpy(audioBuffer + recordedSamples, temp, samples * sizeof(int16_t));
-  recordedSamples += samples;
 
   if (recordedSamples >= MAX_SAMPLES) {
     stopRecording();
+    logf("Recording reached MAX_SAMPLES via watchguard");
   }
 
-  // Calculate a simple RMS level for the visual meter.
-  double accum = 0.0;
-  for (size_t i = 0; i < samples; ++i) {
-    const float s = temp[i] / 32768.0f;
-    accum += s * s;
-  }
-  float rms = (samples > 0) ? sqrtf(accum / samples) : 0.0f;
-  levelOut = constrain(rms * 4.0f, 0.0f, 1.0f);
+  levelOut = micLastMeter;
 }
 
 // -----------------------------------------------------------------------------
@@ -318,37 +455,62 @@ void playMouse() {
 
 void playBuffer(uint32_t playbackRate) {
   if (!audioBuffer || !hasRecording || recordedSamples == 0) {
+    logf("playBuffer aborted: buffer=%d hasRecording=%d samples=%u", audioBuffer != nullptr, hasRecording ? 1 : 0, static_cast<unsigned>(recordedSamples));
     return;
+  }
+
+  if (micChunkInFlight) {
+    uint32_t guardStart = millis();
+    while (M5.Mic.isRecording() != 0 && (millis() - guardStart) < 60) {
+      delay(2);
+    }
+    micChunkInFlight = false;
+    micChunkPtr = nullptr;
+    micChunkLength = 0;
+  }
+
+  if (M5.Mic.isRunning()) {
+    logf("Stopping mic before playback");
+    while (M5.Mic.isRecording() != 0) {
+      delay(2);
+    }
+    M5.Mic.end();
+  }
+
+  if (M5.Speaker.isRunning()) {
+    M5.Speaker.stop();
+    M5.Speaker.end();
   }
 
   auto spkCfg = M5.Speaker.config();
   spkCfg.sample_rate = playbackRate;
-  M5.Speaker.begin(spkCfg);
+  M5.Speaker.config(spkCfg);
+  M5.Speaker.begin();
+  logf("Speaker begin at rate=%u", playbackRate);
 
   blinkTimer = millis();
   blinkPhase = false;
   drawFace(FACE_PLAYING, 0.0f);
   drawModeBadge();
 
-  const size_t chunkSamples = 256;
-  size_t offset = 0;
-  while (offset < recordedSamples) {
-    size_t remaining = recordedSamples - offset;
-    size_t toWrite = (remaining < chunkSamples) ? remaining : chunkSamples;
+  M5.Speaker.playRaw(audioBuffer, recordedSamples, playbackRate, false, 1, 0);
+  logf("Playback started samples=%u", static_cast<unsigned>(recordedSamples));
 
-    M5.Speaker.playRaw(audioBuffer + offset, toWrite, playbackRate);
-    offset += toWrite;
-
-    // Blink animation timing.
+  while (M5.Speaker.isPlaying()) {
     if (millis() - blinkTimer > FACE_BLINK_INTERVAL) {
       blinkTimer = millis();
       blinkPhase = !blinkPhase;
       drawFace(FACE_PLAYING, 0.0f);
     }
+    delay(10);
+    updateInput();
   }
 
   // Ensure audio hardware stops when finished.
   M5.Speaker.stop();
+  M5.Speaker.end();
+  M5.Mic.begin();
+  logf("Playback finished, mic resumed");
   blinkPhase = false;
 }
 
