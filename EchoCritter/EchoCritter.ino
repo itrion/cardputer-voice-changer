@@ -2,8 +2,8 @@
 
 // -----------------------------------------------------------------------------
 // Echo Critter v1
-// Press and hold the ENTER button to capture up to three seconds of audio.
-// Playback automatically alternates between NORMAL (1.0x) and MOUSE (~1.4x).
+// Press and hold the GO/ENTER button to capture up to three seconds of audio.
+// Playback always returns the recording at a playful chipmunk (~1.4x) speed.
 // -----------------------------------------------------------------------------
 
 constexpr uint32_t SAMPLE_RATE = 16000;           // Microphone & speaker base rate
@@ -14,16 +14,12 @@ constexpr uint32_t FACE_BLINK_INTERVAL = 120;     // milliseconds between playfa
 constexpr size_t RECORD_CHUNK_SAMPLES = 256;      // Samples per I2S read block
 constexpr bool ENABLE_DEBUG_LOG = true;          // Toggle verbose serial logging
 
-// Modes for playback behaviour.
-enum PlaybackMode { MODE_NORMAL = 0, MODE_MOUSE = 1 };
-
 // Visual state for the face renderer.
 enum FaceState { FACE_IDLE, FACE_RECORDING, FACE_PLAYING };
 
 int16_t *audioBuffer = nullptr;                   // Sample storage in (P)SRAM
 size_t recordedSamples = 0;                       // Number of valid samples
 bool hasRecording = false;                        // True when recording is available
-PlaybackMode currentMode = MODE_NORMAL;           // Alternates every playback
 
 bool recordingActive = false;                     // True while capturing audio
 uint32_t recordStartMs = 0;                       // Timestamp when recording started
@@ -31,13 +27,8 @@ uint32_t recordStartMs = 0;                       // Timestamp when recording st
 uint32_t blinkTimer = 0;                          // Used for playback face animation
 bool blinkPhase = false;                          // Toggle for blinking animation
 
-// Microphone chunk tracking.
-bool micChunkInFlight = false;
-size_t micChunkLength = 0;
-int16_t *micChunkPtr = nullptr;
-uint32_t micChunkStartMs = 0;
 float micLastMeter = 0.0f;
-uint32_t micDecayStamp = 0;
+uint32_t micLastMeterUpdate = 0;
 
 bool cardputerKeyboardEnabled = false;
 
@@ -57,10 +48,9 @@ void logf(const char *fmt, ...) {
 void initDisplay();
 void initAudio();
 void recordOnce(float &levelOut);
-void playNormal();
-void playMouse();
+void playChipmunk();
 void drawFace(FaceState state, float meter = 0.0f);
-void drawModeBadge();
+void drawStatusBadge();
 
 // Utility helpers.
 void showSplash();
@@ -72,15 +62,18 @@ void playBuffer(uint32_t playbackRate);
 
 void setup() {
   auto cfg = M5.config();
-  M5.begin(cfg);
-  logf("Booting Echo Critter, board=%d", static_cast<int>(M5.getBoard()));
-
-  auto board = M5.getBoard();
-  if (board == m5::board_t::board_M5Cardputer || board == m5::board_t::board_M5CardputerADV) {
-    M5Cardputer.Keyboard.begin();
-    cardputerKeyboardEnabled = true;
-    logf("Cardputer keyboard enabled");
+  cfg.output_power = true;
+  cfg.internal_mic = true;
+  cfg.internal_spk = true;
+  cfg.serial_baudrate = ENABLE_DEBUG_LOG ? 115200 : cfg.serial_baudrate;
+  if (ENABLE_DEBUG_LOG) {
+    Serial.begin(115200);
+    delay(50);
   }
+  M5Cardputer.begin(cfg);
+  cardputerKeyboardEnabled = true;
+  logf("Booting Echo Critter, board=%d", static_cast<int>(M5.getBoard()));
+  logf("Cardputer keyboard ready");
 
   // Allocate audio buffer preferably in PSRAM.
   audioBuffer = static_cast<int16_t *>(ps_malloc(BUFFER_BYTES));
@@ -101,17 +94,21 @@ void loop() {
   bool enterJustPressed = false;
   bool enterReleased = false;
 
+  bool goPressed = M5.BtnA.isPressed();
+  bool goJustPressed = M5.BtnA.wasPressed();
+  bool goReleased = M5.BtnA.wasReleased();
+
   if (cardputerKeyboardEnabled) {
     static bool prevEnter = false;
     bool enterNow = M5Cardputer.Keyboard.keysState().enter;
-    enterPressed = enterNow;
-    enterJustPressed = enterNow && !prevEnter;
-    enterReleased = !enterNow && prevEnter;
+    enterPressed = enterNow || goPressed;
+    enterJustPressed = (enterNow && !prevEnter) || goJustPressed;
+    enterReleased = (!enterNow && prevEnter) || goReleased;
     prevEnter = enterNow;
   } else {
-    enterPressed = M5.BtnA.isPressed();
-    enterJustPressed = M5.BtnA.wasPressed();
-    enterReleased = M5.BtnA.wasReleased();
+    enterPressed = goPressed;
+    enterJustPressed = goJustPressed;
+    enterReleased = goReleased;
   }
 
   if (enterJustPressed && !recordingActive) {
@@ -122,8 +119,9 @@ void loop() {
   if (recordingActive) {
     recordOnce(rmsLevel);
     drawFace(FACE_RECORDING, rmsLevel);
-    drawModeBadge();
+    drawStatusBadge();
     if (millis() - recordStartMs >= MAX_RECORD_MS) {
+      logf("Max record duration reached");
       stopRecording();
     }
   }
@@ -135,27 +133,24 @@ void loop() {
     }
 
     if (hasRecording && recordedSamples > 0) {
-      if (currentMode == MODE_NORMAL) {
-        logf("Playback NORMAL mode");
-        playNormal();
-        currentMode = MODE_MOUSE;
-      } else {
-        logf("Playback MOUSE mode");
-        playMouse();
-        currentMode = MODE_NORMAL;
-      }
+      logf("Playback chipmunk mode");
+      playChipmunk();
+      hasRecording = false;
+      recordedSamples = 0;
+      micLastMeter = 0.0f;
+      micLastMeterUpdate = millis();
     } else {
       logf("No recording available on release");
     }
 
-    drawModeBadge();
+    drawStatusBadge();
     drawFace(FACE_IDLE, 0.0f);
   }
 
   if (!recordingActive && !enterPressed && !hasRecording) {
     // Idle prompt when nothing has been captured yet.
     drawFace(FACE_IDLE, 0.0f);
-    drawModeBadge();
+    drawStatusBadge();
   }
 }
 
@@ -200,7 +195,7 @@ void drawFace(FaceState state, float meter) {
     case FACE_IDLE:
       faceText = "(o_o)";
       M5.Display.setTextSize(2);
-      M5.Display.drawString("Hold ENTER to record", M5.Display.width() / 2, 150);
+      M5.Display.drawString("Hold GO to record", M5.Display.width() / 2, 150);
       M5.Display.fillRect(0, 180, M5.Display.width(), 50, TFT_BLACK);
       break;
     case FACE_RECORDING:
@@ -208,7 +203,7 @@ void drawFace(FaceState state, float meter) {
       drawRecordingHud(meter);
       break;
     case FACE_PLAYING:
-      faceText = blinkPhase ? "(^O^)" : "(^o^)";
+      faceText = blinkPhase ? "(^o^)" : "(^O^)";
       break;
   }
 
@@ -222,21 +217,27 @@ void drawFace(FaceState state, float meter) {
   }
 }
 
-void drawModeBadge() {
-  static PlaybackMode lastMode = static_cast<PlaybackMode>(-1);
-  if (lastMode == currentMode) {
+void drawStatusBadge() {
+  static int lastState = -1;
+  int state = recordingActive ? 1 : (hasRecording ? 2 : 0);
+  if (state == lastState) {
     return;
   }
 
-  const char *label = (currentMode == MODE_NORMAL) ? "Mode: NORMAL" : "Mode: MOUSE";
+  const char *label = nullptr;
+  switch (state) {
+    case 1: label = "Recording..."; break;
+    case 2: label = "Release to play"; break;
+    default: label = "Hold GO to record"; break;
+  }
 
-  M5.Display.fillRoundRect(10, 10, 200, 36, 8, TFT_DARKGREY);
-  M5.Display.drawRoundRect(10, 10, 200, 36, 8, TFT_WHITE);
+  M5.Display.fillRoundRect(10, 10, 220, 36, 8, TFT_DARKGREY);
+  M5.Display.drawRoundRect(10, 10, 220, 36, 8, TFT_WHITE);
   M5.Display.setTextDatum(textdatum_t::middle_left);
   M5.Display.setTextSize(2);
   M5.Display.drawString(label, 24, 28);
 
-  lastMode = currentMode;
+  lastState = state;
 }
 
 void drawRecordingHud(float level) {
@@ -254,10 +255,10 @@ void drawRecordingHud(float level) {
 }
 
 void updateInput() {
-  M5.update();
   if (cardputerKeyboardEnabled) {
-    M5Cardputer.Keyboard.updateKeyList();
-    M5Cardputer.Keyboard.updateKeysState();
+    M5Cardputer.update();
+  } else {
+    M5.update();
   }
 }
 
@@ -307,12 +308,10 @@ void startRecording() {
     return;
   }
 
-  logf("startRecording()");
-
   if (M5.Speaker.isRunning()) {
     M5.Speaker.stop();
-    M5.Speaker.end();
   }
+  M5.Speaker.end();
   if (!M5.Mic.isRunning()) {
     M5.Mic.begin();
   }
@@ -321,18 +320,14 @@ void startRecording() {
   hasRecording = false;
   recordingActive = true;
   recordStartMs = millis();
-  blinkTimer = millis();
+  blinkTimer = recordStartMs;
   blinkPhase = false;
-
-  micChunkInFlight = false;
-  micChunkLength = 0;
-  micChunkPtr = nullptr;
   micLastMeter = 0.0f;
-  micChunkStartMs = millis();
-  micDecayStamp = millis();
+  micLastMeterUpdate = recordStartMs;
 
+  logf("Recording started");
   drawFace(FACE_RECORDING, 0.0f);
-  drawModeBadge();
+  drawStatusBadge();
 }
 
 void stopRecording() {
@@ -340,38 +335,12 @@ void stopRecording() {
     return;
   }
 
-  logf("stopRecording() in-flight=%d", micChunkInFlight ? 1 : 0);
-
   recordingActive = false;
-
-  if (micChunkInFlight) {
-    uint32_t guardStart = millis();
-    while (M5.Mic.isRecording() != 0 && (millis() - guardStart) < 120) {
-      delay(2);
-    }
-    if (M5.Mic.isRecording() == 0) {
-      double accum = 0.0;
-      for (size_t i = 0; i < micChunkLength; ++i) {
-        float sample = micChunkPtr[i] / 32768.0f;
-        accum += sample * sample;
-      }
-      if (micChunkLength > 0) {
-        micLastMeter = constrain(sqrtf(accum / micChunkLength) * 4.0f, 0.0f, 1.0f);
-        recordedSamples += micChunkLength;
-      }
-      micChunkInFlight = false;
-      micChunkPtr = nullptr;
-      micChunkLength = 0;
-      logf("Flushed last chunk, total samples=%u", static_cast<unsigned>(recordedSamples));
-    }
-  }
-
   while (M5.Mic.isRecording() != 0) {
     delay(2);
   }
 
   hasRecording = recordedSamples > 0;
-  micLastMeter = 0.0f;
   logf("Recording complete, samples=%u", static_cast<unsigned>(recordedSamples));
 }
 
@@ -383,58 +352,34 @@ void recordOnce(float &levelOut) {
     return;
   }
 
-  if (!micChunkInFlight) {
-    if (recordedSamples >= MAX_SAMPLES) {
-      stopRecording();
-      logf("Recording buffer full at %u samples", static_cast<unsigned>(recordedSamples));
-      levelOut = micLastMeter;
-      return;
-    }
-
-    size_t remaining = MAX_SAMPLES - recordedSamples;
-    micChunkLength = (remaining < RECORD_CHUNK_SAMPLES) ? remaining : RECORD_CHUNK_SAMPLES;
-    if (micChunkLength == 0) {
-      stopRecording();
-      levelOut = micLastMeter;
-      return;
-    }
-
-    micChunkPtr = audioBuffer + recordedSamples;
-    micChunkStartMs = millis();
-    micDecayStamp = micChunkStartMs;
-    micChunkInFlight = true;
-    M5.Mic.record(micChunkPtr, micChunkLength, SAMPLE_RATE, false);
-    logf("Queued mic chunk length=%u at sample=%u", static_cast<unsigned>(micChunkLength), static_cast<unsigned>(recordedSamples));
-    levelOut = micLastMeter;
+  if (recordedSamples >= MAX_SAMPLES) {
+    stopRecording();
     return;
   }
 
-  if (M5.Mic.isRecording() == 0 && (millis() - micChunkStartMs) > 8) {
+  size_t remaining = MAX_SAMPLES - recordedSamples;
+  size_t chunkSamples = (remaining < RECORD_CHUNK_SAMPLES) ? remaining : RECORD_CHUNK_SAMPLES;
+  int16_t *dst = audioBuffer + recordedSamples;
+
+  if (M5.Mic.record(dst, chunkSamples, SAMPLE_RATE, false)) {
     double accum = 0.0;
-    for (size_t i = 0; i < micChunkLength; ++i) {
-      const float s = micChunkPtr[i] / 32768.0f;
+    for (size_t i = 0; i < chunkSamples; ++i) {
+      float s = dst[i] / 32768.0f;
       accum += s * s;
     }
-    size_t completed = micChunkLength;
-    if (completed > 0) {
-      micLastMeter = constrain(sqrtf(accum / completed) * 4.0f, 0.0f, 1.0f);
-      recordedSamples += completed;
-    }
-    micChunkPtr = nullptr;
-    micChunkLength = 0;
-    micChunkInFlight = false;
-    logf("Captured mic chunk=%u total=%u meter=%.2f", static_cast<unsigned>(completed), static_cast<unsigned>(recordedSamples), micLastMeter);
-  } else if (millis() - micDecayStamp > 40) {
-    micDecayStamp = millis();
-    micLastMeter *= 0.94f;
+    micLastMeter = (chunkSamples > 0)
+        ? constrain(sqrtf(accum / static_cast<double>(chunkSamples)) * 4.0f, 0.0f, 1.0f)
+        : 0.0f;
+    recordedSamples += chunkSamples;
+    micLastMeterUpdate = millis();
+    hasRecording = recordedSamples > 0;
+    logf("Captured chunk=%u total=%u meter=%.2f", static_cast<unsigned>(chunkSamples), static_cast<unsigned>(recordedSamples), micLastMeter);
+  } else if (millis() - micLastMeterUpdate > 60) {
+    micLastMeter *= 0.92f;
     if (micLastMeter < 0.01f) {
       micLastMeter = 0.0f;
     }
-  }
-
-  if (recordedSamples >= MAX_SAMPLES) {
-    stopRecording();
-    logf("Recording reached MAX_SAMPLES via watchguard");
+    micLastMeterUpdate = millis();
   }
 
   levelOut = micLastMeter;
@@ -444,11 +389,7 @@ void recordOnce(float &levelOut) {
 // Playback logic
 // -----------------------------------------------------------------------------
 
-void playNormal() {
-  playBuffer(SAMPLE_RATE);
-}
-
-void playMouse() {
+void playChipmunk() {
   uint32_t rate = static_cast<uint32_t>(SAMPLE_RATE * 1.4f);
   playBuffer(rate);
 }
@@ -457,16 +398,6 @@ void playBuffer(uint32_t playbackRate) {
   if (!audioBuffer || !hasRecording || recordedSamples == 0) {
     logf("playBuffer aborted: buffer=%d hasRecording=%d samples=%u", audioBuffer != nullptr, hasRecording ? 1 : 0, static_cast<unsigned>(recordedSamples));
     return;
-  }
-
-  if (micChunkInFlight) {
-    uint32_t guardStart = millis();
-    while (M5.Mic.isRecording() != 0 && (millis() - guardStart) < 60) {
-      delay(2);
-    }
-    micChunkInFlight = false;
-    micChunkPtr = nullptr;
-    micChunkLength = 0;
   }
 
   if (M5.Mic.isRunning()) {
@@ -491,7 +422,7 @@ void playBuffer(uint32_t playbackRate) {
   blinkTimer = millis();
   blinkPhase = false;
   drawFace(FACE_PLAYING, 0.0f);
-  drawModeBadge();
+  drawStatusBadge();
 
   M5.Speaker.playRaw(audioBuffer, recordedSamples, playbackRate, false, 1, 0);
   logf("Playback started samples=%u", static_cast<unsigned>(recordedSamples));
@@ -524,9 +455,9 @@ void showSplash() {
   M5.Display.setTextSize(3);
   M5.Display.drawString("Echo Critter v1", M5.Display.width() / 2, M5.Display.height() / 2 - 20);
   M5.Display.setTextSize(2);
-  M5.Display.drawString("Hold ENTER to record", M5.Display.width() / 2, M5.Display.height() / 2 + 20);
+  M5.Display.drawString("Hold GO to record", M5.Display.width() / 2, M5.Display.height() / 2 + 20);
   delay(2000);
   M5.Display.fillScreen(TFT_BLACK);
-  drawModeBadge();
+  drawStatusBadge();
   drawFace(FACE_IDLE, 0.0f);
 }
