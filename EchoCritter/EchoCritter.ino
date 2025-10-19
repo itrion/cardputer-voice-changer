@@ -1,4 +1,5 @@
 #include <M5Cardputer.h>
+#include <esp_heap_caps.h>
 
 // -----------------------------------------------------------------------------
 // Echo Critter v1
@@ -76,9 +77,9 @@ void setup() {
   logf("Cardputer keyboard ready");
 
   // Allocate audio buffer preferably in PSRAM.
-  audioBuffer = static_cast<int16_t *>(ps_malloc(BUFFER_BYTES));
+  audioBuffer = static_cast<int16_t *>(heap_caps_malloc(BUFFER_BYTES, MALLOC_CAP_8BIT | MALLOC_CAP_DMA));
   if (!audioBuffer) {
-    audioBuffer = static_cast<int16_t *>(malloc(BUFFER_BYTES));
+    audioBuffer = static_cast<int16_t *>(ps_malloc(BUFFER_BYTES));
   }
   logf("Audio buffer allocation %s (%u bytes)", audioBuffer ? "ok" : "FAILED", static_cast<unsigned>(BUFFER_BYTES));
 
@@ -291,7 +292,8 @@ void initAudio() {
   spkCfg.dma_buf_len = 256;
   spkCfg.dma_buf_count = 6;
   M5.Speaker.config(spkCfg);
-  M5.Speaker.setVolume(180);
+  M5.Speaker.setVolume(255);
+  M5.Speaker.setAllChannelVolume(255);
   logf("Speaker config set: rate=%u stereo=%d dma=%u/%u volume=%u", spkCfg.sample_rate, spkCfg.stereo, static_cast<unsigned>(spkCfg.dma_buf_count), static_cast<unsigned>(spkCfg.dma_buf_len), static_cast<unsigned>(M5.Speaker.getVolume()));
 
   M5.Speaker.end();  // Free I2S for the microphone by default
@@ -413,11 +415,14 @@ void playBuffer(uint32_t playbackRate) {
     M5.Speaker.end();
   }
 
-  auto spkCfg = M5.Speaker.config();
-  spkCfg.sample_rate = playbackRate;
-  M5.Speaker.config(spkCfg);
-  M5.Speaker.begin();
-  logf("Speaker begin at rate=%u", playbackRate);
+  bool spkOk = M5.Speaker.begin();
+  logf("Speaker begin -> %s", spkOk ? "ok" : "FAILED");
+  if (!spkOk) {
+    return;
+  }
+  M5.Speaker.setVolume(255);
+  M5.Speaker.setAllChannelVolume(255);
+  logf("Speaker volume=%u", static_cast<unsigned>(M5.Speaker.getVolume()));
 
   blinkTimer = millis();
   blinkPhase = false;
@@ -440,8 +445,8 @@ void playBuffer(uint32_t playbackRate) {
   // Ensure audio hardware stops when finished.
   M5.Speaker.stop();
   M5.Speaker.end();
-  M5.Mic.begin();
-  logf("Playback finished, mic resumed");
+  bool micOk = M5.Mic.begin();
+  logf("Playback finished, mic resumed -> %s", micOk ? "ok" : "FAILED");
   blinkPhase = false;
 }
 
