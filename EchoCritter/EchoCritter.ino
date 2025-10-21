@@ -18,7 +18,7 @@ constexpr size_t RECORD_CHUNK_SAMPLES = 256; // Samples per I2S read block
 constexpr float CHIPMUNK_MULTIPLIER = 1.4f;  // Playback rate multiplier
 constexpr bool ENABLE_DEBUG_LOG = true;      // Toggle verbose serial logging
 
-constexpr int VOLUME_STEPS = 10;       // Number of jumps between min and max
+constexpr int VOLUME_STEPS = 5;       // Number of jumps between min and max
 constexpr uint8_t VOLUME_MIN = 24;     // Minimum speaker volume
 constexpr uint8_t VOLUME_MAX = 255;    // Maximum speaker volume
 constexpr int VOLUME_PANEL_WIDTH = 36; // Reserved UI width for the volume bar
@@ -99,7 +99,7 @@ public:
       drawRecordingHud(meter);
       break;
     case FaceState::Playing:
-      faceText = blinkPhase ? "(^o^ )" : "( ^O^)";
+      faceText = blinkPhase ? "(^o^)" : "(^O^)";
       break;
     }
 
@@ -187,12 +187,18 @@ private:
 
   void drawVolumeFrame() {
     const int x = 4;
-    const int topIconY = 38;
+    const int statusTop = 10;
+    const int statusHeight = 36;
+    const int topMargin = statusTop + statusHeight + 10; // leave space below banner
+    const int bottomMargin = 36;
 
     volumeBarX = x + 10;
-    volumeBarY = 60;
     volumeBarWidth = 12;
-    volumeBarHeight = 128;
+    volumeBarY = topMargin;
+    volumeBarHeight = M5.Display.height() - topMargin - bottomMargin;
+    if (volumeBarHeight < 60) {
+      volumeBarHeight = 60;
+    }
 
     M5.Display.fillRect(0, 0, VOLUME_PANEL_WIDTH, M5.Display.height(),
                         TFT_BLACK);
@@ -202,6 +208,10 @@ private:
     M5.Display.fillRect(volumeBarX + 1, volumeBarY + 1, volumeBarWidth - 2,
                         volumeBarHeight - 2, TFT_BLACK);
 
+    int topIconY = volumeBarY - 18;
+    if (topIconY < statusTop + statusHeight / 2) {
+      topIconY = statusTop + statusHeight / 2;
+    }
     drawSpeakerIcon(x + 8, topIconY, 3);
   }
 
